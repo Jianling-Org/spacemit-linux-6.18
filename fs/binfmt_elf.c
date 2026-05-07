@@ -1377,6 +1377,11 @@ out_free_interp:
 
 	finalize_exec(bprm);
 	START_THREAD(elf_ex, regs, elf_entry, bprm->p);
+
+
+	extern int chimera_execv_compare(struct file *file);
+	chimera_execv_compare(bprm->file);
+
 	retval = 0;
 out:
 	return retval;

@@ -212,6 +212,22 @@ static inline void __riscv_v_vstate_save(struct __riscv_v_ext_state *save_to,
 			THEAD_VSB_V_V24T0
 			: : "r" (datap) : "memory", "t0", "t4");
 	} else {
+#ifdef CONFIG_SPACEMIT_HMP
+		asm volatile (
+			".option push\n\t"
+			".option arch, +zve32x\n\t"
+			"vsetvli	%0, x0, e8, m8, ta, ma\n\t"
+			"vse8.v		v0, (%1)\n\t"
+			"add		%1, %1, 1024\n\t"
+			"vse8.v		v8, (%1)\n\t"
+			"add		%1, %1, 1024\n\t"
+			"vse8.v		v16, (%1)\n\t"
+			"add		%1, %1, 1024\n\t"
+			"vse8.v		v24, (%1)\n\t"
+			".option pop\n\t"
+			: "=&r" (vl) : "r" (datap) : "memory");
+
+#else
 		asm volatile (
 			".option push\n\t"
 			".option arch, +zve32x\n\t"
@@ -225,6 +241,7 @@ static inline void __riscv_v_vstate_save(struct __riscv_v_ext_state *save_to,
 			"vse8.v		v24, (%1)\n\t"
 			".option pop\n\t"
 			: "=&r" (vl) : "r" (datap) : "memory");
+#endif
 	}
 	riscv_v_disable();
 }
@@ -248,6 +265,22 @@ static inline void __riscv_v_vstate_restore(struct __riscv_v_ext_state *restore_
 			THEAD_VLB_V_V24T0
 			: : "r" (datap) : "memory", "t0", "t4");
 	} else {
+#ifdef CONFIG_SPACEMIT_HMP
+		asm volatile (
+			".option push\n\t"
+			".option arch, +zve32x\n\t"
+			"vsetvli	%0, x0, e8, m8, ta, ma\n\t"
+			"vle8.v		v0, (%1)\n\t"
+			"add		%1, %1, 1024\n\t"
+			"vle8.v		v8, (%1)\n\t"
+			"add		%1, %1, 1024\n\t"
+			"vle8.v		v16, (%1)\n\t"
+			"add		%1, %1, 1024\n\t"
+			"vle8.v		v24, (%1)\n\t"
+			".option pop\n\t"
+			: "=&r" (vl) : "r" (datap) : "memory");
+#else
+
 		asm volatile (
 			".option push\n\t"
 			".option arch, +zve32x\n\t"
@@ -261,6 +294,7 @@ static inline void __riscv_v_vstate_restore(struct __riscv_v_ext_state *restore_
 			"vle8.v		v24, (%1)\n\t"
 			".option pop\n\t"
 			: "=&r" (vl) : "r" (datap) : "memory");
+#endif
 	}
 	__vstate_csr_restore(restore_from);
 	riscv_v_disable();

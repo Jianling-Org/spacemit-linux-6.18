@@ -15,6 +15,9 @@
 #include <linux/soc/spacemit/spacemit-hmp.h>
 
 
+#include <linux/file.h>
+
+
 static atomic_t system_suspending = ATOMIC_INIT(0);
 
 static struct cpumask	regular_cpu_mask __read_mostly;
@@ -214,19 +217,44 @@ bool hmp_set_default_cpumask(struct task_struct *p)
 
     /* check if called from set ai task */
     if (p->thread_type == HMP_AI) {
-        _set_cpumask(p, &ai_cpu_mask);
-        return !cpumask_empty(&p->cpus_mask);
+		cpumask_copy(&p->cpus_mask, &ai_cpu_mask);
+		p->nr_cpus_allowed = cpumask_weight(&p->cpus_mask);
+		p->cpus_ptr = &p->cpus_mask;
+
+       return !cpumask_empty(&p->cpus_mask);
     }
 
     /* Check if this is a per-CPU kernel thread that should keep its binding */
     if ((p->flags & PF_KTHREAD) && is_per_cpu_kthread(p))
         return true;
 
+    struct cpumask mask;
+    cpumask_and(&mask, &ai_cpu_mask, &p->cpus_mask);
+
+	if(cpumask_empty(&mask))
+	{
+		p->thread_type = HMP_REGULAR;
+		cpumask_copy(&p->cpus_mask, &regular_cpu_mask);
+		p->nr_cpus_allowed = cpumask_weight(&p->cpus_mask);
+		p->cpus_ptr = &p->cpus_mask;
+	}
+
     /* All new threads default to regular cores unless it's a per-CPU kthread
 	 * AI thread property will be set explicitly via /proc/ai_threads
 	 */
-    p->thread_type = HMP_REGULAR;
-    _set_cpumask(p, &regular_cpu_mask);
+
+	/* enable one ai cpu core if none ai core enabled */
+	cpumask_t online_ai_cpus;
+	cpumask_t online_regular_cpus;
+
+	p->thread_type = HMP_REGULAR;
+	cpumask_and(&online_regular_cpus, &regular_cpu_mask, cpu_online_mask);
+	cpumask_copy(&p->cpus_mask, &online_regular_cpus);
+
+	p->nr_cpus_allowed = cpumask_weight(&p->cpus_mask);
+	p->cpus_ptr = &p->cpus_mask;
+
+	pr_info("cpu_device_up p->cpus_mask : %*pb\n", cpumask_pr_args(p->cpus_ptr));
     return !cpumask_empty(&p->cpus_mask);
 }
 
@@ -253,12 +281,22 @@ static struct notifier_block pm_notifier = {
 	.priority = INT_MAX,
 };
 
-int hmp_set_ai_thread(pid_t pid)
+int hmp_set_ai_thread(pid_t raw_pid)
 {
+	pid_t pid;
 	unsigned int cpu;
 	int ret = 0;
 	cpumask_t online_ai_cpus;
 	struct task_struct *t = NULL;
+
+	if (raw_pid < 0)
+	{
+		pid = -raw_pid;
+	}
+	else
+	{
+		pid = raw_pid;
+	}
 
 	/* enable one ai cpu core if none ai core enabled */
 	cpumask_and(&online_ai_cpus, &ai_cpu_mask, cpu_online_mask);
@@ -285,15 +323,38 @@ int hmp_set_ai_thread(pid_t pid)
 	get_task_struct(t);
 	rcu_read_unlock();
 
+	pr_info("[before] hmp_set_ai_thread p->cpus_mask : %*pb\n", cpumask_pr_args(t->cpus_ptr));
 	/* mark the thread type as an ai thread under task_lock */
 	task_lock(t);
 	t->thread_type = HMP_AI;
+	if (raw_pid < 0)
+	{
+		t->thread_type = HMP_REGULAR;
+	}
+	else
+	{
+		t->thread_type = HMP_AI;
+	}
 	task_unlock(t);
 
-	ret = set_cpus_allowed_ptr(t, &ai_cpu_mask);
+	if (raw_pid < 0)
+	{
+		ret = set_cpus_allowed_ptr(t, &regular_cpu_mask);
+		pr_warn("%s: pid:%u(%s), set 256 regular CPU !!!\n",
+			__func__, -pid, t->comm);
+	}
+	else
+	{
+		ret = set_cpus_allowed_ptr(t, &ai_cpu_mask);
+		pr_warn("%s: pid:%u(%s), set 1024 AI CPU !!!\n",
+			__func__, pid, t->comm);
+	}
+
 	if (ret) {
 		task_lock(t);
 		t->thread_type = HMP_REGULAR;
+		pr_warn("%s: pid:%u(%s), set_cpus_allowed_ptr failed!!!\n",
+			__func__, t->pid, t->comm);
 		task_unlock(t);
 	} else if (t->thread.vstate.datap) {
 		/*
@@ -304,6 +365,8 @@ int hmp_set_ai_thread(pid_t pid)
 		pr_warn("%s: pid:%u(%s), vector has been enabled already!!!\n",
 			__func__, t->pid, t->comm);
 	}
+
+	pr_info("[after] hmp_set_ai_thread p->cpus_mask : %*pb\n", cpumask_pr_args(t->cpus_ptr));
 
 	put_task_struct(t);
 	return ret;
@@ -320,7 +383,10 @@ static ssize_t proc_set_thread_type(struct file *file, const char __user *buf,
 		return -EINVAL;
 
 	if (pid < 0)
-        return -EINVAL;
+	{
+		pr_warn("%s: pid:%u, set 1024 --- 256 bit!!!\n",
+			__func__, -pid);
+	}
 
 	ret = hmp_set_ai_thread(pid);
 	return ret == 0 ? count : ret;
