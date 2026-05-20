@@ -17,6 +17,23 @@
 
 #include <linux/file.h>
 
+#define ENABLE_CHIMERA_WARN_LOG
+
+#ifdef ENABLE_CHIMERA_WARN_LOG
+// #define chimera_warn(fmt, ...) pr_warn(fmt, ##__VA_ARGS__)
+#define chimera_warn(fmt, ...) pr_warn_ratelimited(fmt, ##__VA_ARGS__)
+
+#else
+#define chimera_warn(fmt, ...) do { } while (0)
+#endif
+
+#ifdef ENABLE_CHIMERA_INFO_LOG
+// #define chimera_info(fmt, ...) pr_info(fmt, ##__VA_ARGS__)
+#define chimera_info(fmt, ...) pr_info_ratelimited(fmt, ##__VA_ARGS__)
+#else
+#define chimera_info(fmt, ...) do { } while (0)
+#endif
+
 
 static atomic_t system_suspending = ATOMIC_INIT(0);
 
@@ -254,7 +271,7 @@ bool hmp_set_default_cpumask(struct task_struct *p)
 	p->nr_cpus_allowed = cpumask_weight(&p->cpus_mask);
 	p->cpus_ptr = &p->cpus_mask;
 
-	pr_info("cpu_device_up p->cpus_mask : %*pb\n", cpumask_pr_args(p->cpus_ptr));
+	// pr_info_ratelimited("cpu_device_up p->cpus_mask : %*pb\n", cpumask_pr_args(p->cpus_ptr));
     return !cpumask_empty(&p->cpus_mask);
 }
 
@@ -323,7 +340,7 @@ int hmp_set_ai_thread(pid_t raw_pid)
 	get_task_struct(t);
 	rcu_read_unlock();
 
-	pr_info("[before] hmp_set_ai_thread p->cpus_mask : %*pb\n", cpumask_pr_args(t->cpus_ptr));
+	chimera_info("[before] hmp_set_ai_thread p->cpus_mask : %*pb\n", cpumask_pr_args(t->cpus_ptr));
 	/* mark the thread type as an ai thread under task_lock */
 	task_lock(t);
 	t->thread_type = HMP_AI;
@@ -340,20 +357,20 @@ int hmp_set_ai_thread(pid_t raw_pid)
 	if (raw_pid < 0)
 	{
 		ret = set_cpus_allowed_ptr(t, &regular_cpu_mask);
-		pr_warn("%s: pid:%u(%s), set 256 regular CPU !!!\n",
+		chimera_info("%s: pid:%u(%s), set 256 regular CPU !!!\n",
 			__func__, -pid, t->comm);
 	}
 	else
 	{
 		ret = set_cpus_allowed_ptr(t, &ai_cpu_mask);
-		pr_warn("%s: pid:%u(%s), set 1024 AI CPU !!!\n",
+		chimera_info("%s: pid:%u(%s), set 1024 AI CPU !!!\n",
 			__func__, pid, t->comm);
 	}
 
 	if (ret) {
 		task_lock(t);
 		t->thread_type = HMP_REGULAR;
-		pr_warn("%s: pid:%u(%s), set_cpus_allowed_ptr failed!!!\n",
+		chimera_info("%s: pid:%u(%s), set_cpus_allowed_ptr failed!!!\n",
 			__func__, t->pid, t->comm);
 		task_unlock(t);
 	} else if (t->thread.vstate.datap) {
@@ -362,11 +379,11 @@ int hmp_set_ai_thread(pid_t raw_pid)
 		 * to AI cores, if it has been initiated already, just
 		 * reset the vector state!!
 		 */
-		pr_warn("%s: pid:%u(%s), vector has been enabled already!!!\n",
+		chimera_info("%s: pid:%u(%s), vector has been enabled already!!!\n",
 			__func__, t->pid, t->comm);
 	}
 
-	pr_info("[after] hmp_set_ai_thread p->cpus_mask : %*pb\n", cpumask_pr_args(t->cpus_ptr));
+	chimera_info("[after] hmp_set_ai_thread p->cpus_mask : %*pb\n", cpumask_pr_args(t->cpus_ptr));
 
 	put_task_struct(t);
 	return ret;
@@ -384,7 +401,7 @@ static ssize_t proc_set_thread_type(struct file *file, const char __user *buf,
 
 	if (pid < 0)
 	{
-		pr_warn("%s: pid:%u, set 1024 --- 256 bit!!!\n",
+		chimera_info("%s: pid:%u, set 1024 --- 256 bit!!!\n",
 			__func__, -pid);
 	}
 
