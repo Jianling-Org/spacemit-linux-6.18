@@ -871,8 +871,8 @@ static unsigned int hmp_prefer_reserved_cpu_count(void)
 
 	raw_spin_lock_irqsave(&prefer_cpu_reservation_lock, flags);
 	for_each_possible_cpu(cpu) {
-		if (prefer_cpu_reservations[cpu].owner &&
-		    !time_after(jiffies, prefer_cpu_reservations[cpu].deadline))
+		/* Expired owners still hold task references until released. */
+		if (prefer_cpu_reservations[cpu].owner)
 			count++;
 	}
 	raw_spin_unlock_irqrestore(&prefer_cpu_reservation_lock, flags);
