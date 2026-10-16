@@ -897,11 +897,6 @@ static int hmp_idle_group_cpu(const struct cpumask *allowed, hmp_type_e type)
 	return -1;
 }
 
-static int hmp_idle_ai_cpu(const struct cpumask *allowed)
-{
-	return hmp_idle_group_cpu(allowed, HMP_AI);
-}
-
 /* A group may already be idle when an exit changes the layer counts, so no
  * new idle edge is guaranteed to arrive. Kick reconciliation immediately. */
 static void hmp_prefer_kick_rebalance(void)
@@ -1705,7 +1700,7 @@ void hmp_prefer_idle(int cpu)
 
 int hmp_prefer_wakeup(struct task_struct *p, bool is_fork)
 {
-	cpumask_t allowed, ai_allowed, regular_allowed;
+	cpumask_t allowed, source_allowed;
 	hmp_type_e target, reassign_target;
 	int cpu;
 
@@ -1713,25 +1708,20 @@ int hmp_prefer_wakeup(struct task_struct *p, bool is_fork)
 	    p->in_execve)
 		return -1;
 
-	/* The fork path is the only path where the task is not yet on a runqueue, so
-	 * its inherited affinity can be switched before select_task_rq commits
-	 * the first CPU. */
+	/* A clone child resumes the parent's image and vector context. TASK_NEW
+	 * is not permission to change VLEN before the proposal/ACK transition. */
 	if (is_fork) {
+		hmp_type_e source_type = READ_ONCE(p->thread_type);
+		const struct cpumask *source = source_type == HMP_AI ?
+			&ai_cpu_mask : &regular_cpu_mask;
+
 		cpumask_copy(&allowed, p->cpus_ptr);
-		cpumask_and(&ai_allowed, &allowed, &ai_cpu_mask);
-		if (!cpumask_empty(&ai_allowed)) {
-			p->thread_type = HMP_AI;
-			cpumask_copy(&p->cpus_mask, &ai_allowed);
-			p->nr_cpus_allowed = cpumask_weight(&ai_allowed);
+		cpumask_and(&source_allowed, &allowed, source);
+		if (!cpumask_empty(&source_allowed)) {
+			cpumask_copy(&p->cpus_mask, &source_allowed);
+			p->nr_cpus_allowed = cpumask_weight(&source_allowed);
 			p->cpus_ptr = &p->cpus_mask;
-			return hmp_idle_ai_cpu(&ai_allowed);
-		}
-		cpumask_and(&regular_allowed, &allowed, &regular_cpu_mask);
-		if (!cpumask_empty(&regular_allowed)) {
-			p->thread_type = HMP_REGULAR;
-			cpumask_copy(&p->cpus_mask, &regular_allowed);
-			p->nr_cpus_allowed = cpumask_weight(&regular_allowed);
-			p->cpus_ptr = &p->cpus_mask;
+			return hmp_idle_group_cpu(&source_allowed, source_type);
 		}
 		return -1;
 	}
