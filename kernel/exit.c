@@ -63,6 +63,9 @@
 #include <linux/random.h>
 #include <linux/rcuwait.h>
 #include <linux/compat.h>
+#ifdef CONFIG_SPACEMIT_HMP
+#include <linux/soc/spacemit/spacemit-hmp.h>
+#endif
 #include <linux/io_uring.h>
 #include <linux/kprobes.h>
 #include <linux/rethook.h>
@@ -911,6 +914,10 @@ void __noreturn do_exit(long code)
 
 	io_uring_files_cancel();
 	exit_signals(tsk);  /* sets PF_EXITING */
+
+#ifdef CONFIG_SPACEMIT_HMP
+	hmp_prefer_unregister(tsk);
+#endif
 
 	seccomp_filter_release(tsk);
 

@@ -38,6 +38,9 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/numa_balancing.h>
 #include <linux/sched/task.h>
+#ifdef CONFIG_SPACEMIT_HMP
+#include <linux/soc/spacemit/spacemit-hmp.h>
+#endif
 #include <linux/pagemap.h>
 #include <linux/perf_event.h>
 #include <linux/highmem.h>
@@ -1118,6 +1121,13 @@ int begin_new_exec(struct linux_binprm * bprm)
 	 * Ensure all future errors are fatal.
 	 */
 	bprm->point_of_no_return = true;
+
+#ifdef CONFIG_SPACEMIT_HMP
+	hmp_prefer_unregister(me);
+	WRITE_ONCE(me->prefer_a100, false);
+	WRITE_ONCE(me->hmp_prefer_ready, false);
+	WRITE_ONCE(me->prefer_migrate_after, 0);
+#endif
 
 	/* Make this the only thread in the thread group */
 	retval = de_thread(me);

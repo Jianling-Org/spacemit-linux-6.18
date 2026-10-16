@@ -98,6 +98,9 @@
 #include <linux/scs.h>
 #include <linux/io_uring.h>
 #include <linux/bpf.h>
+#ifdef CONFIG_SPACEMIT_HMP
+#include <linux/soc/spacemit/spacemit-hmp.h>
+#endif
 #include <linux/stackprotector.h>
 #include <linux/user_events.h>
 #include <linux/iommu.h>
@@ -2430,6 +2433,10 @@ __latent_entropy struct task_struct *copy_process(
 	user_events_fork(p, clone_flags);
 
 	copy_oom_score_adj(clone_flags, p);
+
+#ifdef CONFIG_SPACEMIT_HMP
+	hmp_prefer_inherit_fork(p);
+#endif
 
 	return p;
 

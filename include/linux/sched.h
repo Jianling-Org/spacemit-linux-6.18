@@ -1663,6 +1663,25 @@ struct task_struct {
 #ifdef CONFIG_SPACEMIT_HMP
 	/* type of the task defined on HMP system */
 	unsigned long			thread_type;
+	/* Inherited by fork; cleared when committing a new exec. */
+	bool				prefer_a100;
+	/* Explicit userspace opt-in after preparing both execution forms. */
+	bool				hmp_prefer_ready;
+	/* Logical HMP group assigned while this preferred task is alive. */
+	s8				prefer_assigned_group;
+	/* Protected by prefer_account_lock while a swap is pending. */
+	u64				prefer_assignment_seq;
+	/* Earliest jiffies at which another automatic HMP migration may commit. */
+	unsigned long			prefer_migrate_after;
+	/* Cross-VLEN proposal state; protected by sighand->siglock. */
+	u32				prefer_proposal_generation;
+	u8				prefer_proposal_state;
+	u8				prefer_proposal_reason;
+	u8				prefer_proposal_reassign;
+	s8				prefer_pending_group;
+	u32				prefer_proposal_assignment_seq;
+	s16				prefer_target_cpu;
+	unsigned long			prefer_proposal_deadline;
 #endif
 
 	/*

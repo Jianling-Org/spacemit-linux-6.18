@@ -3148,10 +3148,35 @@ out:
  */
 int __set_cpus_allowed_ptr(struct task_struct *p, struct affinity_context *ctx)
 {
+	const struct cpumask *original_mask = ctx->new_mask;
 	struct rq_flags rf;
 	struct rq *rq;
+	int ret;
+#ifdef CONFIG_SPACEMIT_HMP
+	int cpu;
+#endif
 
 	rq = task_rq_lock(p, &rf);
+#ifdef CONFIG_SPACEMIT_HMP
+	/* Chimera runtimes may install affinity after pthread_create().  Preserve
+	 * that request as user_cpus_ptr, but keep the effective mask in the current
+	 * physical HMP group until the validated HMP migration path changes it.
+	 * This runs under pi_lock/rq lock, so thread_type cannot race a stopper.
+	 * If the request names only the other group, retain the current effective
+	 * mask: marked tasks explicitly allow the policy to override affinity. */
+	if ((ctx->flags & SCA_USER) && READ_ONCE(p->prefer_a100)) {
+		cpumask_copy(rq->scratch_mask, ctx->new_mask);
+		for_each_cpu(cpu, rq->scratch_mask) {
+			if ((p->thread_type == HMP_AI && !hmp_cpu_is_ai(cpu)) ||
+			    (p->thread_type == HMP_REGULAR &&
+			     !hmp_cpu_is_regular(cpu)))
+				cpumask_clear_cpu(cpu, rq->scratch_mask);
+		}
+		if (cpumask_empty(rq->scratch_mask))
+			cpumask_copy(rq->scratch_mask, &p->cpus_mask);
+		ctx->new_mask = rq->scratch_mask;
+	}
+#endif
 	/*
 	 * Masking should be skipped if SCA_USER or any of the SCA_MIGRATE_*
 	 * flags are set.
@@ -3161,7 +3186,11 @@ int __set_cpus_allowed_ptr(struct task_struct *p, struct affinity_context *ctx)
 	    cpumask_and(rq->scratch_mask, ctx->new_mask, p->user_cpus_ptr))
 		ctx->new_mask = rq->scratch_mask;
 
-	return __set_cpus_allowed_ptr_locked(p, ctx, rq, &rf);
+	ret = __set_cpus_allowed_ptr_locked(p, ctx, rq, &rf);
+	/* rq->scratch_mask is valid only while the rq lock is held.  Restore the
+	 * caller-owned pointer for a possible cpuset-race retry. */
+	ctx->new_mask = original_mask;
+	return ret;
 }
 
 int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
@@ -3174,6 +3203,219 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
 	return __set_cpus_allowed_ptr(p, &ac);
 }
 EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
+
+#ifdef CONFIG_SPACEMIT_HMP
+struct hmp_idle_migration {
+	struct task_struct *task;
+	const struct cpumask *mask;
+	int cpu;
+	hmp_type_e type;
+	enum hmp_migration_reason reason;
+	u32 generation;
+};
+
+#define HMP_PREFER_MIGRATION_COOLDOWN_MS	100
+
+/* Like the affinity stopper, but commit only into an empty destination rq. */
+static int hmp_idle_migration_stop(void *data)
+{
+	struct hmp_idle_migration *arg = data;
+	struct task_struct *p = arg->task;
+	struct rq *src = this_rq(), *dst = cpu_rq(arg->cpu);
+	struct affinity_context ctx = { .new_mask = arg->mask };
+	struct rq_flags srf, drf;
+	unsigned long flags, cooldown_deadline;
+	hmp_type_e source_type = arg->type == HMP_AI ? HMP_REGULAR : HMP_AI;
+	bool user_allows_target_group = false;
+	int cpu;
+	int ret = -EAGAIN;
+
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	double_rq_lock(src, dst);
+	rq_pin_lock(src, &srf);
+	rq_pin_lock(dst, &drf);
+	cooldown_deadline = READ_ONCE(p->prefer_migrate_after);
+	if (task_rq(p) != src || task_on_cpu(src, p) ||
+	    is_migration_disabled(p) || p->migration_pending ||
+	    (p->flags & (PF_EXITING | PF_KTHREAD | PF_NO_SETAFFINITY)) ||
+	    !p->prefer_a100 ||
+	    (p->in_execve && arg->reason != HMP_EXEC) ||
+	    (!p->hmp_prefer_ready && !chimera_task_is_target(p)) ||
+	    p->sched_class != &fair_sched_class ||
+	    !hmp_prefer_can_migrate() ||
+	    (arg->generation &&
+	     (READ_ONCE(p->prefer_proposal_generation) != arg->generation ||
+	      READ_ONCE(p->prefer_proposal_state) != HMP_PREFER_PROPOSAL_COMMITTING ||
+	      READ_ONCE(p->prefer_target_cpu) != arg->cpu ||
+	      READ_ONCE(p->prefer_pending_group) !=
+		(arg->type == HMP_AI ? HMP_PREFER_GROUP_AI :
+					 HMP_PREFER_GROUP_REGULAR))) ||
+	    (arg->reason != HMP_MANUAL && cooldown_deadline &&
+	     time_before(jiffies, cooldown_deadline)) ||
+	    p->thread_type != source_type ||
+	    (source_type == HMP_AI ? !hmp_cpu_is_ai(cpu_of(src)) :
+                               !hmp_cpu_is_regular(cpu_of(src))) ||
+	    !cpu_active(arg->cpu) || !idle_cpu(arg->cpu) || dst->nr_running ||
+	    dst->ttwu_pending)
+		goto out;
+	if (p->user_cpus_ptr) {
+		for_each_cpu(cpu, p->user_cpus_ptr) {
+			if ((arg->type == HMP_AI && hmp_cpu_is_ai(cpu)) ||
+			    (arg->type == HMP_REGULAR && hmp_cpu_is_regular(cpu))) {
+				user_allows_target_group = true;
+				break;
+			}
+		}
+		if (user_allows_target_group) {
+			cpumask_and(src->scratch_mask, arg->mask,
+				    p->user_cpus_ptr);
+			if (!cpumask_test_cpu(arg->cpu, src->scratch_mask)) {
+				ret = -EPERM;
+				goto out;
+			}
+			ctx.new_mask = src->scratch_mask;
+		}
+	}
+
+	update_rq_clock(src);
+	update_rq_clock(dst);
+	p->thread_type = arg->type;
+	__do_set_cpus_allowed(p, &ctx);
+	if (task_on_rq_queued(p)) {
+		/* Keeps sched_migrate_task/BPF and all ordinary migration
+		 * bookkeeping. */
+		move_queued_task_locked(src, dst, p);
+		trace_sched_prefer_a100_migrate(p, cpu_of(src), cpu_of(dst),
+					       arg->reason);
+		wakeup_preempt(dst, p, 0);
+	} else {
+		/* Match the normal affinity stopper for a task that went to sleep
+		 * while the request was pending. */
+		p->wake_cpu = arg->cpu;
+	}
+	if (arg->reason != HMP_MANUAL)
+		WRITE_ONCE(p->prefer_migrate_after,
+			   jiffies + msecs_to_jiffies(HMP_PREFER_MIGRATION_COOLDOWN_MS));
+	ret = 0;
+out:
+	rq_unpin_lock(dst, &drf);
+	rq_unpin_lock(src, &srf);
+	double_rq_unlock(src, dst);
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+	return ret;
+}
+
+int sched_hmp_set_group(struct task_struct *p, const struct cpumask *mask,
+		       hmp_type_e type, int idle_cpu,
+		       enum hmp_migration_reason reason)
+{
+	struct affinity_context ctx = { .new_mask = mask };
+	struct rq_flags rf;
+	struct rq *rq;
+	unsigned long old_type;
+	int ret;
+
+	if (idle_cpu >= 0) {
+		struct hmp_idle_migration arg = {
+			.task = p, .mask = mask, .cpu = idle_cpu,
+			.type = type, .reason = reason,
+		};
+		int src = task_cpu(p);
+
+		if ((type == HMP_AI ? !hmp_cpu_is_regular(src) :
+					 !hmp_cpu_is_ai(src)) || !cpu_active(src))
+			return -EAGAIN;
+		return stop_one_cpu(src, hmp_idle_migration_stop, &arg);
+	}
+
+	rq = task_rq_lock(p, &rf);
+	if ((p->flags & (PF_EXITING | PF_NO_SETAFFINITY)) ||
+	    (reason != HMP_MANUAL && p->sched_class != &fair_sched_class)) {
+		task_rq_unlock(rq, p, &rf);
+		return -EPERM;
+	}
+	/* Preserve the existing set_cpus_allowed_ptr user-mask convention. */
+	if (reason == HMP_MANUAL && p->user_cpus_ptr &&
+	    cpumask_and(rq->scratch_mask, mask, p->user_cpus_ptr))
+		ctx.new_mask = rq->scratch_mask;
+	old_type = p->thread_type;
+	p->thread_type = type;
+	ret = __set_cpus_allowed_ptr_locked(p, &ctx, rq, &rf);
+	if (ret) {
+		rq = task_rq_lock(p, &rf);
+		p->thread_type = old_type;
+		task_rq_unlock(rq, p, &rf);
+	}
+	return ret;
+}
+
+int sched_hmp_ack_current(const struct cpumask *mask, hmp_type_e type,
+			  int target_cpu, enum hmp_migration_reason reason,
+			  u32 generation)
+{
+	struct hmp_idle_migration arg = {
+		.task = current, .mask = mask, .cpu = target_cpu,
+		.type = type, .reason = reason, .generation = generation,
+	};
+	int src = task_cpu(current);
+
+	if ((type == HMP_AI ? !hmp_cpu_is_regular(src) : !hmp_cpu_is_ai(src)) ||
+	    !cpu_active(src))
+		return -EAGAIN;
+	return stop_one_cpu(src, hmp_idle_migration_stop, &arg);
+}
+
+/* Return stable references; the stopper revalidates every scheduling state. */
+unsigned int sched_hmp_candidates(struct task_struct **tasks, unsigned int limit,
+				  int target_cpu, unsigned int *cursor)
+{
+	struct task_struct *p;
+	struct rq *rq;
+	unsigned long flags;
+	unsigned int count = 0;
+	unsigned int skipped = 0;
+	int cpu;
+
+	if (!limit)
+		return 0;
+	if (target_cpu >= 0 &&
+	    ((!hmp_cpu_is_ai(target_cpu) && !hmp_cpu_is_regular(target_cpu)) ||
+	     !cpu_active(target_cpu)))
+		return 0;
+
+	for_each_cpu(cpu, cpu_active_mask) {
+		if (target_cpu >= 0 && hmp_cpu_is_ai(target_cpu) &&
+		    !hmp_cpu_is_regular(cpu))
+			continue;
+		if (target_cpu >= 0 && hmp_cpu_is_regular(target_cpu) &&
+		    !hmp_cpu_is_ai(cpu))
+			continue;
+		rq = cpu_rq(cpu);
+		raw_spin_rq_lock_irqsave(rq, flags);
+		list_for_each_entry(p, &rq->cfs_tasks, se.group_node) {
+			if (!READ_ONCE(p->prefer_a100) || p->in_execve ||
+				READ_ONCE(p->thread_type) !=
+					(hmp_cpu_is_ai(target_cpu) ? HMP_REGULAR : HMP_AI) ||
+				(p->flags & (PF_EXITING | PF_KTHREAD)))
+				continue;
+			if (cursor && skipped < *cursor) {
+				skipped++;
+				continue;
+			}
+			get_task_struct(p);
+			tasks[count++] = p;
+			if (count == limit)
+				break;
+		}
+		raw_spin_rq_unlock_irqrestore(rq, flags);
+		if (count == limit)
+			break;
+	}
+	if (cursor)
+		*cursor = skipped + count;
+	return count;
+}
+#endif
 
 /*
  * Change a given task's CPU affinity to the intersection of its current
@@ -4691,6 +4933,21 @@ int sched_fork(u64 clone_flags, struct task_struct *p)
 	 * event cannot wake it up and insert it on the runqueue either.
 	 */
 	p->__state = TASK_NEW;
+#ifdef CONFIG_SPACEMIT_HMP
+	/* The copied value belongs to the parent; the child is accounted by
+	 * hmp_prefer_inherit_fork() while it is still TASK_NEW. */
+	p->prefer_assigned_group = HMP_PREFER_GROUP_NONE;
+	p->prefer_assignment_seq = 0;
+	p->prefer_migrate_after = 0;
+	p->prefer_proposal_generation = 0;
+	p->prefer_proposal_state = HMP_PREFER_PROPOSAL_NONE;
+	p->prefer_proposal_reason = 0;
+	p->prefer_proposal_reassign = 0;
+	p->prefer_pending_group = HMP_PREFER_GROUP_NONE;
+	p->prefer_proposal_assignment_seq = 0;
+	p->prefer_target_cpu = -1;
+	p->prefer_proposal_deadline = 0;
+#endif
 
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
@@ -4853,6 +5110,10 @@ void wake_up_new_task(struct task_struct *p)
 		rq_repin_lock(rq, &rf);
 	}
 	task_rq_unlock(rq, p, &rf);
+
+#ifdef CONFIG_SPACEMIT_HMP
+	hmp_prefer_post_fork(p);
+#endif
 }
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS

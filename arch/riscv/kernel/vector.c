@@ -150,6 +150,32 @@ void riscv_v_thread_free(struct task_struct *tsk)
 #endif
 }
 
+#ifdef CONFIG_SPACEMIT_HMP
+/*
+ * A successful cross-VLEN Chimera commit makes the userspace simulator the
+ * sole owner of the saved source vector state.  Drop both the live register
+ * state and its deferred restore before returning to the signal handler; the
+ * target body will allocate a vector context on its first vector instruction.
+ */
+void riscv_v_chimera_reset_current(void)
+{
+	struct pt_regs *regs = task_pt_regs(current);
+
+	if (riscv_v_vstate_query(regs)) {
+		get_cpu_vector_context();
+		riscv_v_vstate_discard(regs);
+		put_cpu_vector_context();
+	}
+	riscv_v_vstate_off(regs);
+	clear_thread_flag(TIF_RISCV_V_DEFER_RESTORE);
+	if (current->thread.vstate.datap)
+		kmem_cache_free(riscv_v_user_cachep,
+				 current->thread.vstate.datap);
+	memset(&current->thread.vstate, 0,
+	       sizeof(current->thread.vstate));
+}
+#endif
+
 #define VSTATE_CTRL_GET_CUR(x) ((x) & PR_RISCV_V_VSTATE_CTRL_CUR_MASK)
 #define VSTATE_CTRL_GET_NEXT(x) (((x) & PR_RISCV_V_VSTATE_CTRL_NEXT_MASK) >> 2)
 #define VSTATE_CTRL_MAKE_NEXT(x) (((x) << 2) & PR_RISCV_V_VSTATE_CTRL_NEXT_MASK)

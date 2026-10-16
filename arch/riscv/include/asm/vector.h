@@ -51,6 +51,9 @@ void put_cpu_vector_context(void);
 void riscv_v_thread_free(struct task_struct *tsk);
 void __init riscv_v_setup_ctx_cache(void);
 void riscv_v_thread_alloc(struct task_struct *tsk);
+#ifdef CONFIG_SPACEMIT_HMP
+void riscv_v_chimera_reset_current(void);
+#endif
 
 static inline u32 riscv_v_flags(void)
 {
@@ -457,6 +460,9 @@ static inline bool riscv_v_vstate_ctrl_user_allowed(void) { return false; }
 #define riscv_v_thread_free(tsk)		do {} while (0)
 #define  riscv_v_setup_ctx_cache()		do {} while (0)
 #define riscv_v_thread_alloc(tsk)		do {} while (0)
+#ifdef CONFIG_SPACEMIT_HMP
+#define riscv_v_chimera_reset_current()	do {} while (0)
+#endif
 
 #endif /* CONFIG_RISCV_ISA_V */
 

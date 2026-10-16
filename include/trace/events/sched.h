@@ -896,6 +896,27 @@ DECLARE_TRACE(sched_set_need_resched,
 	TP_PROTO(struct task_struct *tsk, int cpu, int tif),
 	TP_ARGS(tsk, cpu, tif));
 
+TRACE_EVENT(sched_prefer_a100_migrate,
+	TP_PROTO(struct task_struct *p, int src, int dst, int reason),
+	TP_ARGS(p, src, dst, reason),
+	TP_STRUCT__entry(
+		__field(pid_t, pid)
+		__field(int, src)
+		__field(int, dst)
+		__field(int, reason)
+	),
+	TP_fast_assign(
+		__entry->pid = p->pid;
+		__entry->src = src;
+		__entry->dst = dst;
+		__entry->reason = reason;
+	),
+	TP_printk("pid=%d src_cpu=%d dst_cpu=%d reason=%s",
+		  __entry->pid, __entry->src, __entry->dst,
+		  __print_symbolic(__entry->reason,
+			{ 1, "INITIAL" }, { 2, "IDLE_PULL" }, { 3, "EXEC" }))
+);
+
 #endif /* _TRACE_SCHED_H */
 
 /* This part must be outside protection */

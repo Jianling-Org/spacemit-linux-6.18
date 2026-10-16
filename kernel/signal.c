@@ -1039,8 +1039,9 @@ static inline bool legacy_queue(struct sigpending *signals, int sig)
 	return (sig < SIGRTMIN) && sigismember(&signals->signal, sig);
 }
 
-static int __send_signal_locked(int sig, struct kernel_siginfo *info,
-				struct task_struct *t, enum pid_type type, bool force)
+static int __send_signal_locked_flags(int sig, struct kernel_siginfo *info,
+				      struct task_struct *t, enum pid_type type,
+				      bool force, int queue_flags)
 {
 	struct sigpending *pending;
 	struct sigqueue *q;
@@ -1087,6 +1088,7 @@ static int __send_signal_locked(int sig, struct kernel_siginfo *info,
 	q = sigqueue_alloc(sig, t, GFP_ATOMIC, override_rlimit);
 
 	if (q) {
+		q->flags |= queue_flags;
 		list_add_tail(&q->list, &pending->list);
 		switch ((unsigned long) info) {
 		case (unsigned long) SEND_SIG_NOINFO:
@@ -1156,6 +1158,12 @@ ret:
 	return ret;
 }
 
+static int __send_signal_locked(int sig, struct kernel_siginfo *info,
+				struct task_struct *t, enum pid_type type, bool force)
+{
+	return __send_signal_locked_flags(sig, info, t, type, force, 0);
+}
+
 static inline bool has_si_pid_and_uid(struct kernel_siginfo *info)
 {
 	bool ret = false;
@@ -1213,8 +1221,45 @@ int send_signal_locked(int sig, struct kernel_siginfo *info,
 			force = true;
 		}
 	}
-	return __send_signal_locked(sig, info, t, type, force);
+	return __send_signal_locked_flags(sig, info, t, type, force, 0);
 }
+
+#ifdef CONFIG_SPACEMIT_HMP
+int send_chimera_signal_locked(int sig, struct kernel_siginfo *info,
+			       struct task_struct *t, enum pid_type type)
+{
+	lockdep_assert_held(&t->sighand->siglock);
+	return __send_signal_locked_flags(sig, info, t, type, false,
+					  SIGQUEUE_CHIMERA);
+}
+
+void flush_chimera_signal_locked(struct task_struct *t, int sig)
+{
+	struct sigpending *pending = &t->pending;
+	struct sigqueue *q, *next;
+	bool keep_pending = false;
+
+	lockdep_assert_held(&t->sighand->siglock);
+	list_for_each_entry_safe(q, next, &pending->list, list) {
+		if (q->info.si_signo == sig && (q->flags & SIGQUEUE_CHIMERA)) {
+			list_del_init(&q->list);
+			sigqueue_free_ignored(t, q);
+		}
+	}
+	list_for_each_entry(q, &pending->list, list) {
+		if (q->info.si_signo == sig) {
+			keep_pending = true;
+			break;
+		}
+	}
+	if (!keep_pending)
+		sigdelset(&pending->signal, sig);
+	if (t == current)
+		recalc_sigpending();
+	else
+		recalc_sigpending_tsk(t);
+}
+#endif
 
 static void print_fatal_signal(int signr)
 {

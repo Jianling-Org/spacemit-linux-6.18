@@ -28,6 +28,7 @@ struct sigqueue {
 
 /* flags values. */
 #define SIGQUEUE_PREALLOC	1
+#define SIGQUEUE_CHIMERA	2
 
 struct sigpending {
 	struct list_head list;

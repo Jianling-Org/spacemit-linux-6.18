@@ -3,6 +3,7 @@
 config SPACEMIT_HMP
 	bool "Spacemit HMP support"
 	depends on SMP && SOC_SPACEMIT
+	select IRQ_WORK
 	help
 	  Say y here to enable the HMP feature support.
 	  This feature categorizes the CPU cores within the

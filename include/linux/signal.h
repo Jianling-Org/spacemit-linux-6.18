@@ -285,6 +285,11 @@ extern int group_send_sig_info(int sig, struct kernel_siginfo *info,
 			       struct task_struct *p, enum pid_type type);
 extern int send_signal_locked(int sig, struct kernel_siginfo *info,
 			      struct task_struct *p, enum pid_type type);
+#ifdef CONFIG_SPACEMIT_HMP
+extern int send_chimera_signal_locked(int sig, struct kernel_siginfo *info,
+				      struct task_struct *p, enum pid_type type);
+extern void flush_chimera_signal_locked(struct task_struct *p, int sig);
+#endif
 extern int sigprocmask(int, sigset_t *, sigset_t *);
 extern void set_current_blocked(sigset_t *);
 extern void __set_current_blocked(const sigset_t *);

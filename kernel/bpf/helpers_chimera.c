@@ -41,10 +41,7 @@
 #include <linux/mount.h>
 
 #include <linux/soc/spacemit/spacemit-hmp.h>
-#include <linux/completion.h>
-
 #include <linux/usb/ch9.h>
-#include <linux/xarray.h>
 
 #include <asm/vector.h>
 #include <asm/ptrace.h>
@@ -72,7 +69,6 @@
 	} while (0)
 #endif
 
-static DECLARE_COMPLETION(work_ready);
 static DECLARE_WAIT_QUEUE_HEAD(map_worker_wq);
 
 struct chimera_target_entry {
@@ -84,8 +80,6 @@ static LIST_HEAD(chimera_target_list);
 static DEFINE_MUTEX(chimera_target_list_mutex);
 
 static pid_t target_pid = -1;
-static pid_t target_tgid = -1;
-static long target_pid_init_cpu = -1;
 
 /* Migration target file information supplied by userspace through a BPF map. */
 #define CHIMERA_MAX_TARGET_OFFSETS 20
@@ -106,10 +100,7 @@ struct chimera_migration_target_ctx {
 	struct inode *inode;
 };
 
-char *ino_to_path(struct chimera_migration_target_ctx *target_ctx);
 int chimera_execv_compare(struct file *file);
-int map_worker_start(void);
-void map_worker_stop(void);
 
 static void chimera_sb_callback(struct super_block *sb, void *info)
 {
@@ -119,12 +110,17 @@ static void chimera_sb_callback(struct super_block *sb, void *info)
 	struct chimera_migration_target_info *target_info =
 		target_ctx->target_info;
 
+	if (target_ctx->inode)
+		return;
+
 	spin_lock(&sb->s_inode_list_lock);
 
 	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
 		spin_lock(&inode->i_lock);
 
-		if (inode->i_ino == target_info->inode) {
+		if (inode->i_ino == target_info->inode &&
+		    !(inode->i_state & (I_FREEING | I_WILL_FREE))) {
+			__iget(inode);
 			target_ctx->inode = inode;
 			spin_unlock(&inode->i_lock);
 			break;
@@ -139,45 +135,43 @@ static int chimera_register_migration_target(
 	struct chimera_migration_target_ctx *target_ctx)
 {
 	struct chimera_target_entry *target_entry;
+	struct chimera_target_entry *existing;
 	struct chimera_migration_target_info *target_info =
 		target_ctx->target_info;
-	int err = -EBUSY;
+	bool register_file = target_info->offset_cnt == 0;
+	int err, i;
+
+	if (target_info->offset_cnt < 0 ||
+	    target_info->offset_cnt > CHIMERA_MAX_TARGET_OFFSETS)
+		return -EINVAL;
+	for (i = 0; i < target_info->offset_cnt; i++)
+		register_file |= target_info->offsets[i] == 0;
+	if (!register_file)
+		return -EINVAL;
+
+	target_entry = kzalloc(sizeof(*target_entry), GFP_KERNEL);
+	if (!target_entry)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&target_entry->list);
+	err = kern_path(target_ctx->kern_path, LOOKUP_FOLLOW,
+			&target_entry->path);
+	if (err) {
+		kfree(target_entry);
+		return err;
+	}
 
 	mutex_lock(&chimera_target_list_mutex);
-	if (target_info->offset_cnt == 0) {
-		target_entry = kvcalloc(1, sizeof(*target_entry), GFP_KERNEL);
-		INIT_LIST_HEAD(&target_entry->list);
-
-		err = kern_path(target_ctx->kern_path, LOOKUP_FOLLOW,
-				&target_entry->path);
-		if (err) {
+	list_for_each_entry(existing, &chimera_target_list, list) {
+		if (path_equal(&existing->path, &target_entry->path)) {
+			path_put(&target_entry->path);
 			kfree(target_entry);
-			goto out;
-		}
-
-		list_add(&target_entry->list, &chimera_target_list);
-	}
-
-	for (int i = 0; i < target_info->offset_cnt; i++) {
-		if (target_info->offsets[i] == 0) {
-			target_entry =
-				kvcalloc(1, sizeof(*target_entry), GFP_KERNEL);
-			INIT_LIST_HEAD(&target_entry->list);
-
-			err = kern_path(target_ctx->kern_path, LOOKUP_FOLLOW,
-					&target_entry->path);
-			if (err) {
-				kfree(target_entry);
-				goto out;
-			}
-
-			list_add(&target_entry->list, &chimera_target_list);
-			continue;
+			goto out_unlock;
 		}
 	}
-out:
+	list_add_tail(&target_entry->list, &chimera_target_list);
+out_unlock:
 	mutex_unlock(&chimera_target_list_mutex);
-	return err;
+	return 0;
 }
 
 /*
@@ -187,162 +181,172 @@ out:
  * 遍历所有已挂载的 super_block，在 inode cache 中查找匹配的 inode，
  * 然后通过 dentry 反推路径，并登记目标文件。
  *
- * 返回路径指针；未找到 inode 时返回 ERR_PTR(-ENOENT)，
- * 未找到 dentry 时返回 NULL，也可能返回路径解析产生的 ERR_PTR。
+ * 成功登记返回 0；未找到 inode/dentry 或路径解析失败时返回负 errno。
  */
-char *ino_to_path(struct chimera_migration_target_ctx *target_ctx)
+static int chimera_register_target_inode(
+	struct chimera_migration_target_ctx *target_ctx)
 {
 	char *path = ERR_PTR(-ENOENT);
 	char buf[INO_PATH_BUF];
+	int ret = -ENOENT;
 
 	iterate_supers(chimera_sb_callback, target_ctx);
 	if (target_ctx->inode != NULL) {
 		target_ctx->dentry = d_find_alias(target_ctx->inode);
 		iput(target_ctx->inode);
 
-		if (!target_ctx->dentry) {
-			return NULL;
-		}
+		if (!target_ctx->dentry)
+			return -ENOENT;
 
 		path = dentry_path_raw(target_ctx->dentry, buf, INO_PATH_BUF);
 		dput(target_ctx->dentry);
+		if (IS_ERR(path))
+			return PTR_ERR(path);
 		target_ctx->kern_path = path;
-
-		chimera_register_migration_target(target_ctx);
+		ret = chimera_register_migration_target(target_ctx);
 	}
 
-	return path;
+	return ret;
 }
 
 static struct task_struct *map_worker;
 static struct bpf_map *map_worker_map;
 
+static bool map_worker_has_key(struct bpf_map *map, void *next_key)
+{
+	int ret;
+
+	rcu_read_lock();
+	ret = map->ops->map_get_next_key(map, NULL, next_key);
+	rcu_read_unlock();
+	return ret == 0;
+}
+
+#ifdef CONFIG_SPACEMIT_HMP
+bool chimera_task_is_target(struct task_struct *p)
+{
+	return READ_ONCE(target_pid) == p->tgid;
+}
+#endif
+
 int chimera_execv_compare(struct file *file)
 {
 	struct chimera_target_entry *target_entry;
+	bool matched = false;
 
-	if (!file) {
-		pr_err("struct file  empty \n");
-		return -ENOMEM;
-	}
-
-	char *p, *pathname;
-	pathname = kmalloc(PATH_MAX, GFP_KERNEL);
-	if (!pathname) {
-		pr_err("Failed allocate pathname \n");
-		return -ENOMEM;
-	}
-
-	p = d_path(&file->f_path, pathname, PATH_MAX);
-	if (IS_ERR(p)) {
-		kfree(pathname);
-		return 1;
-	}
-
-	char *path = ERR_PTR(-ENOENT);
-	char buf[INO_PATH_BUF];
+	if (!file)
+		return -EINVAL;
 
 	mutex_lock(&chimera_target_list_mutex);
 	list_for_each_entry(target_entry, &chimera_target_list, list) {
-		path = dentry_path_raw(target_entry->path.dentry, buf,
-				       INO_PATH_BUF);
-		if (IS_ERR(path)) {
-			kfree(pathname);
-			mutex_unlock(&chimera_target_list_mutex);
-			return 1;
-		}
-
-		if (strcmp(p, path) == 0) {
-			target_pid = current->pid;
-			target_tgid = current->tgid;
-			target_pid_init_cpu = task_cpu(current);
-			kfree(pathname);
-			mutex_unlock(&chimera_target_list_mutex);
-			return 0;
+		if (path_equal(&file->f_path, &target_entry->path)) {
+			matched = true;
+			break;
 		}
 	}
-
 	mutex_unlock(&chimera_target_list_mutex);
-	kfree(pathname);
+	if (!matched)
+		return 1;
 
-	return 1;
+	WRITE_ONCE(target_pid, current->tgid);
+#ifdef CONFIG_SPACEMIT_HMP
+	WRITE_ONCE(current->prefer_a100, true);
+	hmp_prefer_register(current);
+	hmp_prefer_task_hint(current);
+	hmp_prefer_exec(current);
+#endif
+	return 0;
 }
 EXPORT_SYMBOL(chimera_execv_compare);
 
 static int kthread_map_worker(void *data)
 {
-	long wake_return_value = 0;
-	struct bpf_map **map_p = (struct bpf_map **)data;
-
-	while (!kthread_should_stop()) {
-		if (*map_p != NULL)
-			break;
-		msleep(1000);
-		reinit_completion(&work_ready);
-		wait_for_completion_interruptible(&work_ready);
-	}
-
-	struct bpf_map *map = *(struct bpf_map **)data;
-	void *cur_key = kzalloc(map->key_size, GFP_KERNEL);
-	void *next_key = kzalloc(map->key_size, GFP_KERNEL);
+	struct bpf_map *map;
+	void *next_key;
+	void *value;
 	void *val_ptr;
+	long wait_ret;
+	bool found;
 
-	if (!cur_key || !next_key) {
-		kfree(cur_key);
-		kfree(next_key);
-		return -ENOMEM;
-	}
+	wait_ret = wait_event_interruptible(
+		map_worker_wq,
+		kthread_should_stop() || READ_ONCE(map_worker_map));
+	if (wait_ret || kthread_should_stop())
+		return wait_ret;
+
+	map = READ_ONCE(map_worker_map);
+	if (!map)
+		return -ENODEV;
+	next_key = kzalloc(map->key_size, GFP_KERNEL);
+	value = kzalloc(map->value_size, GFP_KERNEL);
+	if (!next_key || !value)
+		goto out_free;
 
 	while (!kthread_should_stop()) {
 		struct chimera_migration_target_ctx target_ctx = { NULL };
-		void *cur = NULL;
 
-		wake_return_value = wait_event_interruptible_timeout(
+		wait_ret = wait_event_interruptible_timeout(
 			map_worker_wq,
 			kthread_should_stop() ||
-				(map->ops->map_get_next_key(map, cur, next_key) == 0),
+				map_worker_has_key(map, next_key),
 			msecs_to_jiffies(100));
+		if (kthread_should_stop())
+			break;
+		if (wait_ret <= 0)
+			continue;
 
-		if (wake_return_value > 0) {
-		} else {
+		found = false;
+		rcu_read_lock();
+		val_ptr = map->ops->map_lookup_elem(map, next_key);
+		if (val_ptr) {
+			memcpy(value, val_ptr, map->value_size);
+			found = true;
+		}
+		rcu_read_unlock();
+		if (!found)
+			continue;
+		if (map->value_size < sizeof(struct chimera_migration_target_info)) {
+			map->ops->map_delete_elem(map, next_key);
 			continue;
 		}
 
-		val_ptr = map->ops->map_lookup_elem(map, next_key);
-		if (val_ptr) {
-			target_ctx.target_info =
-				(struct chimera_migration_target_info *)val_ptr;
-			ino_to_path(&target_ctx);
-
-			map->ops->map_delete_elem(map, next_key);
-		}
+		target_ctx.target_info = value;
+		chimera_register_target_inode(&target_ctx);
+		map->ops->map_delete_elem(map, next_key);
 		cond_resched();
 	}
 
-	kfree(cur_key);
+out_free:
+	kfree(value);
 	kfree(next_key);
 	return 0;
 }
 
-int map_worker_start(void)
+static int map_worker_start(void)
 {
 	map_worker =
-		kthread_run(kthread_map_worker, &map_worker_map, "map_worker");
+		kthread_run(kthread_map_worker, NULL, "map_worker");
 	if (IS_ERR(map_worker)) {
-		return PTR_ERR(map_worker);
+		int err = PTR_ERR(map_worker);
+
+		map_worker = NULL;
+		return err;
 	}
 
 	return 0;
 }
 
-void map_worker_stop(void)
+static void map_worker_stop(void)
 {
-	if (!map_worker)
-		return;
+	struct bpf_map *map;
 
-	kthread_stop(map_worker);
-	map_worker = NULL;
-	map_worker_map = NULL;
+	if (map_worker) {
+		kthread_stop(map_worker);
+		map_worker = NULL;
+	}
+	map = xchg(&map_worker_map, NULL);
+	if (map)
+		bpf_map_put(map);
 }
 
 static int __init map_worker_init(void)
@@ -351,28 +355,30 @@ static int __init map_worker_init(void)
 }
 late_initcall(map_worker_init);
 
+static void __exit map_worker_exit(void)
+{
+	struct chimera_target_entry *entry, *tmp;
+
+	map_worker_stop();
+	mutex_lock(&chimera_target_list_mutex);
+	list_for_each_entry_safe(entry, tmp, &chimera_target_list, list) {
+		list_del(&entry->list);
+		path_put(&entry->path);
+		kfree(entry);
+	}
+	mutex_unlock(&chimera_target_list_mutex);
+}
+module_exit(map_worker_exit);
+
 static inline uint32_t pack(unsigned int vlenb, unsigned int vl)
 {
 	return (vlenb & 0x3fff) | ((vl & 0x1ffff) << 14);
 }
 
-static inline unsigned int get_vlenb(uint32_t v)
-{
-	return v & 0x3fff;
-}
-
-static inline unsigned int get_vl(uint32_t v)
-{
-	return (v >> 14) & 0x1ffff;
-}
-
 struct send_signal_work {
 	struct work_struct work;
-
-	int cpu;
 	pid_t pid;
 	u64 payload;
-	unsigned long pc;
 };
 
 static void send_signal_workfn(struct work_struct *work)
@@ -407,19 +413,30 @@ out_free:
 	kfree(sw);
 }
 
-static DECLARE_WORK(send_signal_work, send_signal_workfn);
-
 __bpf_kfunc_start_defs();
 // bpf_chimera_request_migration
 __bpf_kfunc pid_t bpf_xdp_get_xfrm_state_chimera(pid_t pid, void *p__map,
 					    int dst_cpu)
 {
 	struct bpf_map *map = p__map;
+	struct bpf_map *worker_map;
 
-	if (unlikely(NULL == map_worker_map)) {
-		map_worker_map = map;
-		complete(&work_ready);
+	if (!map || map->map_type != BPF_MAP_TYPE_HASH ||
+	    map->key_size != sizeof(u32) ||
+	    map->value_size != sizeof(struct chimera_migration_target_info) ||
+	    !map->ops->map_get_next_key || !map->ops->map_lookup_elem ||
+	    !map->ops->map_delete_elem)
+		return pid;
+
+	if (unlikely(!READ_ONCE(map_worker_map))) {
+		bpf_map_inc(map);
+		if (cmpxchg(&map_worker_map, NULL, map))
+			bpf_map_put(map);
 	}
+	worker_map = READ_ONCE(map_worker_map);
+	if (worker_map != map)
+		return pid;
+	wake_up_interruptible(&map_worker_wq);
 
 	struct task_struct *task;
 
@@ -435,9 +452,17 @@ __bpf_kfunc pid_t bpf_xdp_get_xfrm_state_chimera(pid_t pid, void *p__map,
 
 	int src_cpu = task_cpu(task);
 
-	if (target_pid != task->tgid) {
+	if (READ_ONCE(target_pid) != task->tgid) {
 		goto out_put_task;
 	}
+
+	/* Managed migrations prepare the vector state before the scheduler
+	 * commit.  A second post-migration signal would race rt_sigreturn in the
+	 * destination VLEN domain. */
+#ifdef CONFIG_SPACEMIT_HMP
+	if (READ_ONCE(task->prefer_a100))
+		goto out_put_task;
+#endif
 
 	if (!((src_cpu > 7 && dst_cpu < 8) || (src_cpu < 8 && dst_cpu > 7))) {
 		goto out_put_task;
@@ -451,7 +476,6 @@ __bpf_kfunc pid_t bpf_xdp_get_xfrm_state_chimera(pid_t pid, void *p__map,
 	}
 
 	INIT_WORK(&sw->work, send_signal_workfn);
-	sw->cpu = dst_cpu;
 	sw->pid = pid;
 	sw->payload = pack(task->thread.vstate.vlenb, task->thread.vstate.vl);
 

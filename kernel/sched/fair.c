@@ -58,6 +58,10 @@
 #include "stats.h"
 #include "autogroup.h"
 
+#ifdef CONFIG_SPACEMIT_HMP
+#include <linux/soc/spacemit/spacemit-hmp.h>
+#endif
+
 /*
  * The initial- and re-scaling of tunables is configurable
  *
@@ -8580,6 +8584,14 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	 * required for stable ->cpus_allowed
 	 */
 	lockdep_assert_held(&p->pi_lock);
+#ifdef CONFIG_SPACEMIT_HMP
+	{
+		int prefer_cpu = hmp_prefer_wakeup(p, wake_flags & WF_FORK);
+
+		if (prefer_cpu >= 0)
+			return prefer_cpu;
+	}
+#endif
 	if (wake_flags & WF_TTWU) {
 		record_wakee(p);
 
@@ -12906,8 +12918,12 @@ out:
 
 	if (pulled_task)
 		this_rq->idle_stamp = 0;
-	else
+	else {
 		nohz_newidle_balance(this_rq);
+#ifdef CONFIG_SPACEMIT_HMP
+		hmp_prefer_idle(this_cpu);
+#endif
+	}
 
 	rq_repin_lock(this_rq, rf);
 

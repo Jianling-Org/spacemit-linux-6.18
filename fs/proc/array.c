@@ -403,6 +403,10 @@ static inline void task_context_switch_counts(struct seq_file *m,
 
 static void task_cpus_allowed(struct seq_file *m, struct task_struct *task)
 {
+#ifdef CONFIG_SPACEMIT_HMP
+	seq_printf(m, "Prefer_a100:\t%d\nHmp_thread_type:\t%lu\n",
+		   READ_ONCE(task->prefer_a100), READ_ONCE(task->thread_type));
+#endif
 	seq_printf(m, "Cpus_allowed:\t%*pb\n",
 		   cpumask_pr_args(&task->cpus_mask));
 	seq_printf(m, "Cpus_allowed_list:\t%*pbl\n",
