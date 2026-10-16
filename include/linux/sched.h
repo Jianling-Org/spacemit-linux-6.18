@@ -1682,6 +1682,15 @@ struct task_struct {
 	u32				prefer_proposal_assignment_seq;
 	s16				prefer_target_cpu;
 	unsigned long			prefer_proposal_deadline;
+	/* Last rejected cross-group route. A matching route is suppressed briefly. */
+	u64				prefer_nack_assignment_seq;
+	u64				prefer_nack_balance_generation;
+	u64				prefer_nack_cpu_cookie;
+	u64				prefer_nack_capability_generation;
+	u64				prefer_capability_generation;
+	u8				prefer_nack_source_group;
+	u8				prefer_nack_target_group;
+	unsigned long			prefer_nack_retry_after;
 #endif
 
 	/*

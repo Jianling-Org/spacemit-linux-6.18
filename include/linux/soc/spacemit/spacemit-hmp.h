@@ -26,6 +26,12 @@ int hmp_map_ai_to_regular(struct cpumask *mask);
 enum hmp_prefer_ack_action {
 	HMP_PREFER_ACK_NACK = 0,
 	HMP_PREFER_ACK_COMMIT = 1,
+	HMP_PREFER_ACK_NACK_TRANSLATED = 2,
+	HMP_PREFER_ACK_NACK_MISSING_ROUTE = 3,
+	HMP_PREFER_ACK_NACK_PREPARE = 4,
+	HMP_PREFER_ACK_NACK_SAFEPOINT = 5,
+	HMP_PREFER_ACK_STATE_ORIGINAL = 6,
+	HMP_PREFER_ACK_CAPABILITY_CHANGED = 7,
 };
 
 struct hmp_prefer_ack {

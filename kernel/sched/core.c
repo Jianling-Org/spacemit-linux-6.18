@@ -4947,6 +4947,14 @@ int sched_fork(u64 clone_flags, struct task_struct *p)
 	p->prefer_proposal_assignment_seq = 0;
 	p->prefer_target_cpu = -1;
 	p->prefer_proposal_deadline = 0;
+	p->prefer_nack_assignment_seq = 0;
+	p->prefer_nack_balance_generation = 0;
+	p->prefer_nack_cpu_cookie = 0;
+	p->prefer_nack_capability_generation = 0;
+	p->prefer_capability_generation = 0;
+	p->prefer_nack_source_group = HMP_PREFER_GROUP_NONE;
+	p->prefer_nack_target_group = HMP_PREFER_GROUP_NONE;
+	p->prefer_nack_retry_after = 0;
 #endif
 
 	/*
