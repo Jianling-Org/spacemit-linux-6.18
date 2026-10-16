@@ -3250,6 +3250,8 @@ static int hmp_idle_migration_stop(void *data)
 	      READ_ONCE(p->prefer_pending_group) !=
 		(arg->type == HMP_AI ? HMP_PREFER_GROUP_AI :
 					 HMP_PREFER_GROUP_REGULAR))) ||
+	    (arg->generation &&
+	     !hmp_prefer_reservation_valid(p, arg->cpu, arg->generation)) ||
 	    (arg->reason != HMP_MANUAL && cooldown_deadline &&
 	     time_before(jiffies, cooldown_deadline)) ||
 	    p->thread_type != source_type ||

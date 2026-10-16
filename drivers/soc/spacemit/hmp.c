@@ -844,6 +844,25 @@ static bool hmp_prefer_reserve_cpu(struct task_struct *p, int cpu,
 	return reserved;
 }
 
+/* Called with the task PI and source/destination rq locks held. No path
+ * holding prefer_cpu_reservation_lock acquires any of those locks. */
+bool hmp_prefer_reservation_valid(struct task_struct *p, int cpu, u32 generation)
+{
+	struct hmp_prefer_cpu_reservation *reservation;
+	unsigned long flags;
+	bool valid;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids || !generation)
+		return false;
+	raw_spin_lock_irqsave(&prefer_cpu_reservation_lock, flags);
+	reservation = &prefer_cpu_reservations[cpu];
+	valid = reservation->owner == p &&
+		reservation->generation == generation &&
+		time_before_eq(jiffies, reservation->deadline);
+	raw_spin_unlock_irqrestore(&prefer_cpu_reservation_lock, flags);
+	return valid;
+}
+
 static void hmp_prefer_release_cpu(struct task_struct *p)
 {
 	struct hmp_prefer_cpu_reservation *reservation;

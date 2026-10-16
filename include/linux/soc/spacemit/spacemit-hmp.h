@@ -65,6 +65,7 @@ void hmp_prefer_exec(struct task_struct *p);
 int hmp_prefer_wakeup(struct task_struct *p, bool is_fork);
 void hmp_prefer_idle(int cpu);
 bool hmp_prefer_task_allowed_cpu(struct task_struct *p, int cpu);
+bool hmp_prefer_reservation_valid(struct task_struct *p, int cpu, u32 generation);
 void hmp_prefer_task_hint(struct task_struct *p);
 void hmp_prefer_register(struct task_struct *p);
 void hmp_prefer_inherit_fork(struct task_struct *p);
