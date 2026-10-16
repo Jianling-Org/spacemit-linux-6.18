@@ -104,7 +104,6 @@ int chimera_execv_compare(struct file *file);
 
 static void chimera_sb_callback(struct super_block *sb, void *info)
 {
-	struct inode *inode = NULL;
 	struct chimera_migration_target_ctx *target_ctx =
 		(struct chimera_migration_target_ctx *)info;
 	struct chimera_migration_target_info *target_info =
@@ -113,22 +112,14 @@ static void chimera_sb_callback(struct super_block *sb, void *info)
 	if (target_ctx->inode)
 		return;
 
-	spin_lock(&sb->s_inode_list_lock);
-
-	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
-		spin_lock(&inode->i_lock);
-
-		if (inode->i_ino == target_info->inode &&
-		    !(inode->i_state & (I_FREEING | I_WILL_FREE))) {
-			__iget(inode);
-			target_ctx->inode = inode;
-			spin_unlock(&inode->i_lock);
-			break;
-		}
-		spin_unlock(&inode->i_lock);
-	}
-	spin_unlock(&sb->s_inode_list_lock);
-	return;
+	/*
+	 * ilookup() performs the inode hash lookup and reference acquisition
+	 * with the VFS locking required for concurrent inode teardown.  Walking
+	 * sb->s_inodes while nesting every inode's i_lock can hold a global
+	 * spinlock for an unbounded time and creates an avoidable lock-order
+	 * hazard in this asynchronous registration path.
+	 */
+	target_ctx->inode = ilookup(sb, target_info->inode);
 }
 
 static int chimera_register_migration_target(
@@ -261,12 +252,13 @@ EXPORT_SYMBOL(chimera_execv_compare);
 
 static int kthread_map_worker(void *data)
 {
+	struct chimera_migration_target_info value;
 	struct bpf_map *map;
-	void *next_key;
-	void *value;
+	u32 next_key;
 	void *val_ptr;
 	long wait_ret;
 	bool found;
+	int ret;
 
 	wait_ret = wait_event_interruptible(
 		map_worker_wq,
@@ -277,55 +269,57 @@ static int kthread_map_worker(void *data)
 	map = READ_ONCE(map_worker_map);
 	if (!map)
 		return -ENODEV;
-	next_key = kzalloc(map->key_size, GFP_KERNEL);
-	value = kzalloc(map->value_size, GFP_KERNEL);
-	if (!next_key || !value)
-		goto out_free;
+	if (map->key_size != sizeof(next_key) ||
+	    map->value_size != sizeof(value))
+		return -EINVAL;
 
 	while (!kthread_should_stop()) {
 		struct chimera_migration_target_ctx target_ctx = { NULL };
 
 		wait_ret = wait_event_interruptible_timeout(
 			map_worker_wq,
-			kthread_should_stop() ||
-				map_worker_has_key(map, next_key),
+			kthread_should_stop(),
 			msecs_to_jiffies(100));
 		if (kthread_should_stop())
 			break;
-		if (wait_ret <= 0)
+		if (wait_ret < 0)
+			continue;
+		if (!map_worker_has_key(map, &next_key))
 			continue;
 
 		found = false;
 		rcu_read_lock();
-		val_ptr = map->ops->map_lookup_elem(map, next_key);
+		val_ptr = map->ops->map_lookup_elem(map, &next_key);
 		if (val_ptr) {
-			memcpy(value, val_ptr, map->value_size);
+			memcpy(&value, val_ptr, sizeof(value));
 			found = true;
 		}
 		rcu_read_unlock();
 		if (!found)
 			continue;
-		if (map->value_size < sizeof(struct chimera_migration_target_info)) {
-			map->ops->map_delete_elem(map, next_key);
-			continue;
-		}
 
-		target_ctx.target_info = value;
-		chimera_register_target_inode(&target_ctx);
-		map->ops->map_delete_elem(map, next_key);
+		target_ctx.target_info = &value;
+		ret = chimera_register_target_inode(&target_ctx);
+		if (ret)
+			pr_warn_ratelimited("failed to register migration target inode %llu: %d\n",
+					    value.inode, ret);
+		rcu_read_lock();
+		ret = map->ops->map_delete_elem(map, &next_key);
+		rcu_read_unlock();
+		if (ret)
+			pr_warn_ratelimited("failed to consume migration target inode %llu: %d\n",
+					    value.inode, ret);
+		if (ret)
+			break;
 		cond_resched();
 	}
 
-out_free:
-	kfree(value);
-	kfree(next_key);
 	return 0;
 }
 
 static int map_worker_start(void)
 {
-	map_worker =
-		kthread_run(kthread_map_worker, NULL, "map_worker");
+	map_worker = kthread_run(kthread_map_worker, NULL, "map_worker");
 	if (IS_ERR(map_worker)) {
 		int err = PTR_ERR(map_worker);
 
@@ -429,14 +423,18 @@ __bpf_kfunc pid_t bpf_xdp_get_xfrm_state_chimera(pid_t pid, void *p__map,
 		return pid;
 
 	if (unlikely(!READ_ONCE(map_worker_map))) {
+		struct bpf_map *old;
+
 		bpf_map_inc(map);
-		if (cmpxchg(&map_worker_map, NULL, map))
+		old = cmpxchg(&map_worker_map, NULL, map);
+		if (old)
 			bpf_map_put(map);
+		else
+			wake_up_interruptible(&map_worker_wq);
 	}
 	worker_map = READ_ONCE(map_worker_map);
 	if (worker_map != map)
 		return pid;
-	wake_up_interruptible(&map_worker_wq);
 
 	struct task_struct *task;
 
