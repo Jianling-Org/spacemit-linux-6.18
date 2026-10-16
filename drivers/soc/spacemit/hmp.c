@@ -602,13 +602,13 @@ void hmp_prefer_register(struct task_struct *p)
 
 	hmp_prefer_task_allowed_groups(p, &ai_allowed, &regular_allowed);
 	raw_spin_lock_irqsave(&p->pi_lock, pi_flags);
-	if (!READ_ONCE(p->prefer_a100) || (p->flags & PF_KTHREAD) ||
+	if (!READ_ONCE(p->prefer_a100) || (p->flags & (PF_KTHREAD | PF_EXITING)) ||
 	    READ_ONCE(p->prefer_assigned_group) != HMP_PREFER_GROUP_NONE) {
 		raw_spin_unlock_irqrestore(&p->pi_lock, pi_flags);
 		return;
 	}
 	raw_spin_lock_irqsave(&prefer_account_lock, flags);
-	if (READ_ONCE(p->prefer_a100) &&
+	if (READ_ONCE(p->prefer_a100) && !(READ_ONCE(p->flags) & PF_EXITING) &&
 	    p->prefer_assigned_group == HMP_PREFER_GROUP_NONE) {
 		unsigned int ai_level = prefer_ai_tasks /
 			hmp_prefer_active_cpus(true);
