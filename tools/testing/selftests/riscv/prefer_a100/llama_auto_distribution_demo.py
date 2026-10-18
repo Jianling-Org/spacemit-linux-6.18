@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS)
 """Observe Chimera llama thread placement and idle pulls without manual migrate."""
 
 import os

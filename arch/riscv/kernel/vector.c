@@ -3,6 +3,7 @@
  * Copyright (C) 2023 SiFive
  * Author: Andy Chiu <andy.chiu@sifive.com>
  */
+/* Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS) */
 #include <linux/export.h>
 #include <linux/sched/signal.h>
 #include <linux/types.h>

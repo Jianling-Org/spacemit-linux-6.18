@@ -1,5 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS)
 # Run on K3 from the separately verified and patched source tree.
 set -euo pipefail
 test "$(uname -m)" = riscv64

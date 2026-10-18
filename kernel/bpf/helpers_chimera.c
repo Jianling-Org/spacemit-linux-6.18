@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS) */
 /* Chimera cross-architecture migration BPF helpers.
  *
  * Note that it is allowed to break compatibility for these functions since the

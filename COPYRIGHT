@@ -1,0 +1,22 @@
+Chimera kernel contributions
+
+Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS)
+
+Covered components:
+  drivers/soc/spacemit/hmp.c
+  kernel/sched/core.c
+  kernel/bpf/helpers_chimera.c
+  include/linux/soc/spacemit/spacemit-hmp.h
+  kernel/signal.c
+  arch/riscv/kernel/vector.c
+  Documentation/scheduler/prefer-a100.rst
+  scripts/chimera/build-prefer-a100.sh
+  tools/testing/selftests/riscv/prefer_a100/analyze_migration_trace.py
+  tools/testing/selftests/riscv/prefer_a100/auto_migration_demo.py
+  tools/testing/selftests/riscv/prefer_a100/layered_demo.py
+  tools/testing/selftests/riscv/prefer_a100/llama_auto_distribution_demo.py
+  tools/testing/selftests/riscv/prefer_a100/run.py
+  tools/testing/selftests/riscv/prefer_a100/scalar.c
+  tools/testing/selftests/riscv/prefer_a100/sleep_wakeup_smoke.py
+
+Each source file retains its existing license identifier and upstream notices.

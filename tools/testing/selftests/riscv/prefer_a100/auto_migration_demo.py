@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS)
 """Demonstrate an automatic X100 -> idle A100 pull without chimera migrate."""
 
 import os

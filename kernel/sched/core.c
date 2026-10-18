@@ -7,6 +7,7 @@
  *  Copyright (C) 1991-2002  Linus Torvalds
  *  Copyright (C) 1998-2024  Ingo Molnar, Red Hat
  */
+/* Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS) */
 #define INSTANTIATE_EXPORTED_MIGRATE_DISABLE
 #include <linux/sched.h>
 #include <linux/highmem.h>

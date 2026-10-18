@@ -10,6 +10,7 @@
  *		Changes to use preallocated sigqueue structures
  *		to allow signals to be sent reliably.
  */
+/* Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS) */
 
 #include <linux/slab.h>
 #include <linux/export.h>

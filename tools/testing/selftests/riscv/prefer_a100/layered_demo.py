@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS)
 """Validate 8-A100/8-X100 layered assignment and managed-task refill."""
 
 import os

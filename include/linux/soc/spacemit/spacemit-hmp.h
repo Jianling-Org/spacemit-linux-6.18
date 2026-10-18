@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (C) 2025 Spacemit */
+/* Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS) */
 
 #ifndef _SPACEMIT_HMP_H_
 #define _SPACEMIT_HMP_H_

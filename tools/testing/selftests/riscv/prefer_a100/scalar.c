@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* Copyright (C) 2026 Institute of Software Chinese Academy of Sciences (ISCAS) */
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
